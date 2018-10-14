@@ -39,9 +39,13 @@ class CombinedClassifier(tf.keras.Model):
     '''
     This is a duplicate of the classifier which training was done on
     '''
-    def __init__(self, num_of_ids):
+class CombinedClassifier(tf.keras.Model):
+    def __init__(self, num_of_ids, loss_type="Class", similarity_threshold=5, class_loss=0.5*1e-4):
         super().__init__()
+        self.loss_type = loss_type
+        self.similarity_threshold = similarity_threshold
         self.num_of_ids = num_of_ids
+        self.flag_for_combined_loss = False
         
         # Conv layer 1 + Pooling
         self.conv1a = tf.keras.layers.Conv2D(filters=32,
@@ -59,7 +63,7 @@ class CombinedClassifier(tf.keras.Model):
                                               )
         
         # Conv layer 2 + Pooling
-        self.conv2a = tf.keras.layers.Conv2D(filters=32,
+        self.conv2a = tf.keras.layers.Conv2D(filters=16,
                                             kernel_size=[3, 3],
                                             strides=(1, 1),
                                             padding='same',
@@ -74,7 +78,7 @@ class CombinedClassifier(tf.keras.Model):
                                               )
         
         # Conv layer 3 + Pooling
-        self.conv3a = tf.keras.layers.Conv2D(filters=32,
+        self.conv3a = tf.keras.layers.Conv2D(filters=16,
                                             kernel_size=[3, 3],
                                             strides=(1, 1),
                                             padding='same',
@@ -89,7 +93,7 @@ class CombinedClassifier(tf.keras.Model):
                                               )
         
         # Dense output layer
-        self.fc1a = tf.keras.layers.Dense(16384, activation=tf.nn.relu)
+        self.fc1a = tf.keras.layers.Dense(4096, activation=tf.nn.relu)
         
         # Dropout layer
         self.dropout = tf.keras.layers.Dropout(rate=0.2)
@@ -97,15 +101,18 @@ class CombinedClassifier(tf.keras.Model):
         # Dense layer for classes
         self.fc2a = tf.keras.layers.Dense(num_of_ids)
         
-        # Choose optimizer
-        self.optimizer1 = tf.train.AdamOptimizer(learning_rate = 0.5*1e-4)
-        self.optimizer2 = tf.train.GradientDescentOptimizer(learning_rate = 1e-4)
+        # Optimizers
+        self.optimizer1 = tf.train.AdamOptimizer(learning_rate=class_loss)
+        self.optimizer2 = tf.train.AdamOptimizer(learning_rate=1e-3, beta1=0.85)
         
     def call(self, inputs, training=True, **kwargs):
+        half_batch_size = int(int(inputs.shape[0]) / 2)
+        batch_size = int(half_batch_size * 2)
+        
         # Input Layer
         input_layer = tf.reshape(inputs, [-1, 96, 96, 1])
         
-        # Flow for first classifier
+        # Flow for classifier
         x1 = self.conv1a(input_layer)
         x1 = self.pool1a(x1)
         x1 = self.conv2a(x1)
@@ -114,10 +121,16 @@ class CombinedClassifier(tf.keras.Model):
         x1 = self.pool3a(x1)
         x1 = tf.reshape(x1, [x1.shape[0], -1])
         x1_id_layer = self.fc1a(x1)
+        
+        # On training when we are doing the classification training, use dropout and get distances
         if (training):
-            x1_dropout = self.dropout(x1_id_layer)
-            x1_logits = self.fc2a(x1_dropout)
-            distances = tf.reduce_mean((x1_id_layer[0:250] - x1_id_layer[250:500])**2, axis=1)
+            if self.loss_type is "Class":
+                x1_dropout = self.dropout(x1_id_layer)
+                x1_logits = self.fc2a(x1_dropout)
+            else:
+                x1_logits = self.fc2a(x1_id_layer)
+            distances = tf.reduce_mean((x1_id_layer[0:half_batch_size] - x1_id_layer[half_batch_size:batch_size])**2, axis=1)
+
         else:
             x1_logits = self.fc2a(x1_id_layer)
             distances = 0
@@ -125,39 +138,48 @@ class CombinedClassifier(tf.keras.Model):
         
         return x1_logits, x1_id_layer, distances 
     
-    def loss(self, logits1, labels1, distances):        
+    def loss(self, logits1, labels1, distances, batch_size):        
+        half_batch_size = int(batch_size / 2)
+        
+        # To make sure that both halves are equal
+        batch_size = int(half_batch_size * 2)
+        
         # Calculate losses according to classification requirments and comparison requirement
         # Loss 1: classification requirement
         onehot_labels = tf.one_hot(indices=tf.cast(labels1, tf.int32), depth = num_of_ids)
         loss_1 = tf.losses.softmax_cross_entropy(onehot_labels, logits1)
-        
-        # Loss 2: comparison requirement)
-        same = np.where(np.array(labels1[0:250] - labels1[250:500]) == 0)[0]
-        diff = np.arange(250)
+            
+        # Loss 2: comparison requirement
+        same = np.where(np.array(labels1[0:half_batch_size] - labels1[half_batch_size:batch_size]) == 0)[0]
+        diff = np.arange(half_batch_size)
         diff = np.delete(diff, same)
-        loss_2 = 0
         if (len(same) > 0):
-            loss_2 += tf.reduce_mean(tf.gather(distances, same))
-        loss_2 += tf.reduce_mean(tf.maximum(0, 1.5 - tf.gather(distances, diff)))
+            loss_same = tf.reduce_mean((tf.gather(distances, same)))
+        loss_diff = tf.reduce_mean(tf.maximum(0, self.similarity_threshold - tf.gather(distances, diff)))
+        loss_2 = loss_same * 0.5 + loss_diff * 0.5
+        
         return loss_1, loss_2
     
     def optimize(self, inputs, labels):
         with tf.GradientTape(persistent=True) as tape:
             x1_logits, x1_id_layer, distances = self(inputs)
-            loss_1, loss_2 = self.loss(x1_logits, labels, distances)
-            
-        gradients = tape.gradient(loss_1, self.variables)
-        self.optimizer1.apply_gradients(zip(gradients, self.variables))
-        gradients = tape.gradient(loss_2, self.variables)
-        self.optimizer2.apply_gradients(zip(gradients, self.variables))
+            loss_1, loss_2 = self.loss(x1_logits, labels, distances, int(inputs.shape[0]))
+        
+        # Apply gradinets according to loss for the training phase we are in
+        if self.loss_type is "Class":
+            gradients = tape.gradient(loss_1, self.variables)
+            self.optimizer1.apply_gradients(zip(gradients, self.variables))
+        if self.loss_type is "Similarity":
+            gradients = tape.gradient(loss_2, [self.variables[6]])
+            self.optimizer2.apply_gradients(zip(gradients, [self.variables[6]]))
         del(tape)
         return loss_1, loss_2
     
-    def extract_features(self, inputs):
-        x1_logits, x1_id_layer, distance = self(inputs, training=False)
-        return x1_id_layer
+    #def extract_features (self, inputs):
+    #    x1_logits, x1_id_layer, distance = self(inputs)
+    #    return x1_id_layer
     
-    def test(self, inputs, labels, similarity_test=False):
+    def test(self, inputs, labels, similarity_test=False, training_set=False, debug_print=False):
         x1_logits, x1_id_layer, distance = self(inputs, training=False)
         test_class_1, test_class_2, test_compare = 0, 0, 0
         
@@ -166,25 +188,51 @@ class CombinedClassifier(tf.keras.Model):
         pred_labels = tf.cast(pred_labels, tf.float64)
         acc = tf.reduce_mean(tf.cast(tf.equal(pred_labels, labels), tf.float32))
         
+        #Scores for the similarity test
         correct = 0
         incorrect = 0
         similarity = 0
+        
+        size = int(inputs.shape[0]) if (int(inputs.shape[0]) % 2 == 0) else int(inputs.shape[0]) - 1
+        
         if (similarity_test):
-            for i in range(inputs.shape[0] - 1):
-                for j in range(i+1, inputs.shape[0]):
-                    if labels[i] == labels[j]:
-                        if (tf.reduce_mean((x1_id_layer[i] - x1_id_layer[j])**2)) < 1.5:
+            if (training_set):
+                for i in range(0, int(size/2)):
+                    if int(labels[i]) == int(labels[int(size/2) + i]):
+                        if (tf.reduce_mean(tf.abs((x1_id_layer[i] - x1_id_layer[int(size/2) + i])**2))) < self.similarity_threshold*0.35:
                             correct += 1
                         else:
                             incorrect += 1
                     else:
-                        if (tf.reduce_mean((x1_id_layer[i] - x1_id_layer[j])**2)) > 1.5:
+                        if (tf.reduce_mean(tf.abs((x1_id_layer[i] - x1_id_layer[int(size/2) + i])**2))) > self.similarity_threshold*0.35:
                             correct += 1
                         else:
                             incorrect += 1
+            else:
+                for i in range(0, size, 2):
+                    if int(labels[i]) == int(labels[i + 1]):
+                        if (tf.reduce_mean(tf.abs((x1_id_layer[i] - x1_id_layer[i + 1])**2))) < self.similarity_threshold*0.35:
+                            correct += 1
+                        else:
+                            if(debug_print):
+                                distance = tf.reduce_mean(tf.abs((x1_id_layer[i] - x1_id_layer[i + 1])**2))
+                                print("Got similar pics wrong: distance = {} thresh = {}".format(distance, self.similarity_threshold*0.35))
+                            incorrect += 1
+                    else:
+                        if (tf.reduce_mean(tf.abs((x1_id_layer[i] - x1_id_layer[i + 1])**2))) > self.similarity_threshold*0.35:
+                            correct += 1
+                        else:
+                            if(debug_print):
+                                distance = tf.reduce_mean(tf.abs((x1_id_layer[i] - x1_id_layer[i + 1])**2))
+                                print("Got different pics wrong: distance = {} thresh = {}".format(distance, self.similarity_threshold*0.35))
+                            incorrect += 1
             similarity = correct/(correct + incorrect)
+            
 
-        return acc, similarity        
+        return acc, similarity
+    def extract_features(self, inputs):
+        x1_logits, x1_id_layer, distance = self(inputs, training=False)
+        return x1_id_layer
 
 #------------------------------------------------------------#          
         
@@ -210,8 +258,9 @@ def check_if_matched(img_dense, dense_dict):
     for name_itr in dense_dict.keys():   
         sum_score, score = 0, 0
         for dense_item in dense_dict[name_itr]:
-            diff = np.mean((np.abs(img_dense - dense_item))**3)
+            diff = np.mean((np.abs(img_dense - dense_item))**2)
             sum_score += diff
+            break
         score = sum_score/len(dense_dict[name_itr])
         scores_dict[name_itr] = score
     
@@ -278,7 +327,7 @@ def get_new_faces_pics(name, source=0):
    
     # We run this to sample 5 pictures within around 5 seconds
     try:
-        while(i < 501):
+        while(i < 101):
 
             # Capture frame-by-frame
             ret, frame = cap.read()
@@ -376,8 +425,8 @@ def add_new_face(name):
     print("1")
     time.sleep(1)
     print("Action!")
-    if False:
-        get_new_faces_pics(name)
+
+    get_new_faces_pics(name)
         
     # Next update the general pickle file holding all of the known faces
     create_pickle_face_rec("samples/")
@@ -420,8 +469,8 @@ def run_face_recognizer(source=0):
 
                         # Do predicition
                         name, score = check_if_matched(dense_for_pic, dense_dict)
-                        print(score**2)
-                        if (score**2 > 15):
+                        print(score)
+                        if (score > 0.9):
                             name = ("Unknown")
 
                         # Keep position data to continue drawing square when there is no prediction
@@ -471,9 +520,7 @@ if __name__ == "__main__":
     # Create model
     tf.enable_eager_execution()
     model = CombinedClassifier(num_of_ids = num_of_ids)
-    
-    # TODO: update this directory name with the correct directory when retrained and re-deployed
-    model.load_weights('checkpoints/my_checkpoint')
+    model.load_weights('checkpoints/cpt_final_5')
     
     # If we are in adding additional faces mode, run face addition and update known faces pickle file. When done exit.
     if args.add_to_face_ds is not None:
