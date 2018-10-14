@@ -95,9 +95,6 @@ def create_dataset(feret_dict, percent_of_train = 0.85, subject_count=725, flip=
     
     # For each id and up to the amount of subject count, lets detect faces and create samples for the data set
     for i in range(subject_count):
-        if True:
-            if (i % 5 == 0):
-                print("Info: subject reached No.{}".format(i))
         subject_id = list_of_ids[i]
         list_of_files = rev_feret_dict[subject_id]
         shuffle(list_of_files)
@@ -170,9 +167,6 @@ def create_dataset_gs(feret_dict, percent_of_train = 0.85, subject_count=725, fl
     
     # For each id and up to the amount of subject count, lets detect faces and create samples for the data set
     for i in range(subject_count):
-        if True:
-            if (i % 5 == 0):
-                print("Info: subject reached No.{}".format(i))
         subject_id = list_of_ids[i]
         list_of_files = rev_feret_dict[subject_id]
         shuffle(list_of_files)
