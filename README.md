@@ -65,4 +65,7 @@ Solution No. 3:
   
 Note that it is required to run a training session and copying the saved model/checkpoints (depending on the app you are using) to the app folder before running the application (files were to big to upload an example).
 In addition the feret_data_dict_gs.pickle.bz2 must be uncompressed as well.
-  
+
+This is an output from the app video showing and classifying me out of 5 people :)
+
+![alt text](https://github.com/michaelfiman/face_rec/blob/master/pic.PNG?raw=true)
