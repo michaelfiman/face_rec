@@ -28,7 +28,7 @@ import time
 import argparse
 import os
 import time
-from keras import backend as K
+from tensorflow.keras import backend as K
 
 #### GLOABLS ####
 mean_image, std_image, num_of_ids = 103.659775, 52.517044, 700 # These actually should be given by part of the model
@@ -39,7 +39,6 @@ class CombinedClassifier(tf.keras.Model):
     '''
     This is a duplicate of the classifier which training was done on
     '''
-class CombinedClassifier(tf.keras.Model):
     def __init__(self, num_of_ids, loss_type="Class", similarity_threshold=5, class_loss=0.5*1e-4):
         super().__init__()
         self.loss_type = loss_type
@@ -51,7 +50,7 @@ class CombinedClassifier(tf.keras.Model):
         self.conv1a = tf.keras.layers.Conv2D(filters=32,
                                             kernel_size=[4, 4],
                                             strides=(1, 1),
-                                            padding='valid',
+                                            padding='same',
                                             activation=tf.nn.leaky_relu,
                                             use_bias=True,
                                             kernel_initializer=tf.contrib.layers.xavier_initializer_conv2d()
@@ -93,7 +92,7 @@ class CombinedClassifier(tf.keras.Model):
                                               )
         
         # Dense output layer
-        self.fc1a = tf.keras.layers.Dense(4096, activation=tf.nn.relu)
+        self.fc1a = tf.keras.layers.Dense(1024, activation=tf.nn.relu)
         
         # Dropout layer
         self.dropout = tf.keras.layers.Dropout(rate=0.2)
@@ -256,12 +255,14 @@ def check_if_matched(img_dense, dense_dict):
     
     # Iterate over the known images dense layer output and compare them to the image dense layer output
     for name_itr in dense_dict.keys():   
-        sum_score, score = 0, 0
+        sum_score, score, min_score = 0, 0, 1000000
         for dense_item in dense_dict[name_itr]:
             diff = np.mean((np.abs(img_dense - dense_item))**2)
             sum_score += diff
-            break
-        score = sum_score/len(dense_dict[name_itr])
+            if (diff < min_score):
+                min_score = diff
+        #score = sum_score/len(dense_dict[name_itr])
+        score = min_score
         scores_dict[name_itr] = score
     
     print_v(scores_dict)
@@ -327,7 +328,7 @@ def get_new_faces_pics(name, source=0):
    
     # We run this to sample 5 pictures within around 5 seconds
     try:
-        while(i < 101):
+        while(images_added != 5):
 
             # Capture frame-by-frame
             ret, frame = cap.read()
@@ -470,7 +471,7 @@ def run_face_recognizer(source=0):
                         # Do predicition
                         name, score = check_if_matched(dense_for_pic, dense_dict)
                         print(score)
-                        if (score > 0.9):
+                        if (score > 6):
                             name = ("Unknown")
 
                         # Keep position data to continue drawing square when there is no prediction
@@ -520,7 +521,7 @@ if __name__ == "__main__":
     # Create model
     tf.enable_eager_execution()
     model = CombinedClassifier(num_of_ids = num_of_ids)
-    model.load_weights('checkpoints/cpt_final_5')
+    model.load_weights('checkpoints/cpt_sim_5')
     
     # If we are in adding additional faces mode, run face addition and update known faces pickle file. When done exit.
     if args.add_to_face_ds is not None:
